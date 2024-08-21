@@ -19,5 +19,11 @@
 
 [StegOnline](https://georgeom.net/StegOnline)
 
+## Reverse Enginering
+[Decompiler Explorer](https://dogbolt.org/)
+
+## Mobile
+[APK Decompiler](https://www.decompiler.com/)
+ 
 ## Pyjail
 [Font Generator](https://tools.picsart.com/text/font-generator/)
