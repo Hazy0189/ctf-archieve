@@ -12,6 +12,8 @@
 
 [Cyber Chef](https://gchq.github.io/CyberChef/)
 
+[AsciiToHex](https://www.asciitohex.com/#google_vignette)
+
 ## Forensic
 [Aperisolver](https://www.aperisolve.com/)
 
