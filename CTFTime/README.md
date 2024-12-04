@@ -7,6 +7,10 @@
 
 [JS Fuck Decoder](https://filipemgs.github.io/poisonjs/)
 
+[CSP Evaluator](https://csp-evaluator.withgoogle.com/)
+
+[Curl Converter](https://curlconverter.com/)
+
 ## Cryptography
 [Dcode.fr](https://www.dcode.fr/)
 
