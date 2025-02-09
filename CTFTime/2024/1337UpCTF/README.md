@@ -2,7 +2,7 @@
 
 | Challenge | Category | Tag | Description | 
 | --- | :---: | :---: | --- |
-| Baby Kernel | pwn | `kernel``stack` | easy kernel stack |
+| Baby Kernel | pwn | `kernel` `stack` | easy kernel stack |
 | Floormat Mega Sale | pwn | `fmtstr` `stack` | fmstr employee variable value to 1 |
 | Notepad | pwn | `heap` | using tcache to get key variable in the heap |
 | Retro2Win | pwn | `stack` `ret2win` | ret2win with args |
