@@ -2,4 +2,4 @@
 
 | Challenge | Category | Tag | Description | 
 | --- | :---: | :---: | --- |
-| no view | pwn | `heap` `fsop` `stdout` `house of botcake` | leakless heap with fsop stdout using house of botcake |
+| no view | pwn | `heap` `fsop` `stdout` `house of plastic cake` | leakless heap with fsop stdout using house of botcake |
