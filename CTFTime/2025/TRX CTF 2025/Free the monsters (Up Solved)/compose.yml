@@ -1,0 +1,17 @@
+services:
+  chall:
+    image: cybersecnatlab/challenge-jail@sha256:d40fa9d97a4b62c68347f4b02b08ed651c39811fc8687759480699888f2f0bd6
+    restart: unless-stopped
+    init: true
+    privileged: true
+    volumes:
+      - './challenge:/home/user/chall:ro'
+      - './ld-linux-x86-64.so.2:/home/user/ld-linux.so:ro'
+      - './libc.so.6:/home/user/libs/libc.so.6:ro'
+    ports:
+      - '7009:1337'
+    environment:
+      - 'FLAG=TRX{F4K3_FL4G}'
+      - 'SET_INTERPRETER=/home/user/ld-linux.so'
+      - 'SET_RPATH=/home/user/libs'
+      - 'TIMEOUT=600'
