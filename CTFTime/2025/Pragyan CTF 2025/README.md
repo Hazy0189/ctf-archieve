@@ -1,4 +1,4 @@
-# Preagyan CTF 2025
+# Pragyan CTF 2025
 
 | Challenge | Category | Tag | Description | 
 | --- | :---: | :---: | --- |
