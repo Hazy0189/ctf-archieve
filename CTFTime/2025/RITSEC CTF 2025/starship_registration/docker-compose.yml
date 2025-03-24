@@ -1,0 +1,8 @@
+services:
+  starship_registration:
+    restart: always
+    container_name: starship_registration
+    build:
+      context: . 
+    ports:
+      - "1574:1574"
