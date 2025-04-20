@@ -1,0 +1,8 @@
+version: '3'
+
+services:
+  ctf:
+    restart: always
+    build: .
+    ports:
+      - '39098:39098'
