@@ -1,4 +1,4 @@
-# CPCTF 2025
+# b01lers CTF 2025
 
 | Challenge | Category | Tag | Description | 
 | --- | :---: | :---: | --- |
