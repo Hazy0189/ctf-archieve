@@ -1,0 +1,2 @@
+vmlinux filter=lfs diff=lfs merge=lfs -text
+*.ext3 filter=lfs diff=lfs merge=lfs -text
