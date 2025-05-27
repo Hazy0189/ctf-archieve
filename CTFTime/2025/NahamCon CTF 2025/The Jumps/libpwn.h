@@ -78,7 +78,7 @@ void spawn_shell() {
 
 char *win_condition = "/home/user/w";
 char *dummy_file = "/home/user/d";
-char *res = "/home/user/syms";
+char *res = "/home/user/flag";
 
 struct stat st = {0};
 
