@@ -1,0 +1,6 @@
+services:
+  pwnfield:
+    build:
+      context: ./
+    ports:
+      - 1235:1235
