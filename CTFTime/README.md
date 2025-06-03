@@ -30,6 +30,9 @@
 ## Reverse Enginering
 [Decompiler Explorer](https://dogbolt.org/)
 
+## Binary Exploitation
+[Syscall Pages Tables](https://syscalls.pages.dev)
+
 ## Mobile
 [APK Decompiler](https://www.decompiler.com/)
  
