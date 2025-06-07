@@ -38,4 +38,5 @@
  
 ## Pyjail
 [Font Generator](https://tools.picsart.com/text/font-generator/)
+
 [Homoglyph Char](https://github.com/codebox/homoglyph/blob/master/raw_data/chars.txt)
