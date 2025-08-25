@@ -1,0 +1,5 @@
+services:
+  recipe-storage:
+    build: .
+    ports:
+      - "1337:1337"
