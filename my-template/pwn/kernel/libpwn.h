@@ -44,9 +44,9 @@ int fd;
 #define SUCCESS_MSG(msg) "\033[32m\033[1m" msg "\033[0m"
 #define INFO_MSG(msg) "\033[34m\033[1m" msg "\033[0m"
 #define ERROR_MSG(msg) "\033[31m\033[1m" msg "\033[0m"
-#define log_success(msg) puts(SUCCESS_MSG(msg))
-#define log_info(msg) puts(INFO_MSG(msg))
-#define log_error(msg) puts(ERROR_MSG(msg))
+#define log_success(fmt, ...) printf(SUCCESS_MSG(fmt "\n"), ##__VA_ARGS__)
+#define log_info(fmt, ...)    printf(INFO_MSG(fmt "\n"), ##__VA_ARGS__)
+#define log_error(fmt, ...)   printf(ERROR_MSG(fmt "\n"), ##__VA_ARGS__)
 
 typedef unsigned long u64;
 typedef unsigned int u32;
