@@ -1,0 +1,54 @@
+diff --git a/src/builtins/iterator.tq b/src/builtins/iterator.tq
+index a9458219c1e..84afb16cd43 100644
+--- a/src/builtins/iterator.tq
++++ b/src/builtins/iterator.tq
+@@ -375,7 +375,8 @@ transitioning javascript builtin AsyncIteratorPrototypeAsyncDispose(
+       // d. IfAbruptRejectPromise(resultWrapper, promiseCapability).
+       const promiseFun = *NativeContextSlot(
+           ContextSlot::PROMISE_FUNCTION_INDEX);
+-      const resultWrapper = promise::PromiseResolve(promiseFun, result);
++      const constructor = SpeciesConstructor(capability, promiseFun);
++      const resultWrapper = promise::PromiseResolve(constructor, result);
+ 
+       // e. Let unwrap be a new Abstract Closure that performs the following
+       // steps when called: i. Return undefined.
+diff --git a/src/d8/d8.cc b/src/d8/d8.cc
+index d91c78951b3..79b2432c768 100644
+--- a/src/d8/d8.cc
++++ b/src/d8/d8.cc
+@@ -4213,11 +4213,13 @@ Local<FunctionTemplate> Shell::CreateNodeTemplates(
+ 
+ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
+   Local<ObjectTemplate> global_template = ObjectTemplate::New(isolate);
+-  global_template->Set(Symbol::GetToStringTag(isolate),
++ /* global_template->Set(Symbol::GetToStringTag(isolate),
+                        String::NewFromUtf8Literal(isolate, "global"));
++                      */
++
+   global_template->Set(isolate, "version",
+                        FunctionTemplate::New(isolate, Version));
+-
++/*
+   global_template->Set(isolate, "print", FunctionTemplate::New(isolate, Print));
+   global_template->Set(isolate, "printErr",
+                        FunctionTemplate::New(isolate, PrintErr));
+@@ -4237,9 +4239,11 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
+                        FunctionTemplate::New(isolate, ExecuteFile));
+   global_template->Set(isolate, "setTimeout",
+                        FunctionTemplate::New(isolate, SetTimeout));
++                      */
+   // Some Emscripten-generated code tries to call 'quit', which in turn would
+   // call C's exit(). This would lead to memory leaks, because there is no way
+   // we can terminate cleanly then, so we need a way to hide 'quit'.
++  /*
+   if (!options.omit_quit) {
+     global_template->Set(isolate, "quit", FunctionTemplate::New(isolate, Quit));
+   }
+@@ -4259,6 +4263,7 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
+                          Shell::CreateAsyncHookTemplate(isolate));
+   }
+ 
++                      */
+   return global_template;
+ }
+
