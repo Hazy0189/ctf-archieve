@@ -68,21 +68,6 @@ Equivalent source tags are merged under one canonical name in this index; the or
 
 **#** — [`__free_hook` (4)](#tag-free-hook) · [`_io_list_all` (1)](#tag-io-list-all)
 
-### Tag Aliases
-
-| Canonical tag | Merged source tags |
-| --- | --- |
-| `__free_hook` | `__free_hook`, `_free_hook`, `free hook`, `freehook` |
-| `brute force` | `brute force`, `bruteforce` |
-| `commit_creds` | `commit`, `commit cred`, `commit creds`, `coomit cred` |
-| `fmtstr` | `fmstr`, `fmtstr` |
-| `got` | `got`, `got overwrite` |
-| `modprobe_path` | `modprobe`, `modprobe_path`, `modprobepath` |
-| `off-by-one overflow` | `off by null byte`, `off by nullbyte`, `off by one`, `off by one byte`, `off by one null byte`, `one byte overflow`, `one null byte`, `one null byte overflow` |
-| `seq_op` | `seq op`, `seq_op` |
-
----
-
 ## Browse by Year and CTF
 
 ### 2026
