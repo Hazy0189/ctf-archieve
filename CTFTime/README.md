@@ -11,7 +11,6 @@ Equivalent source tags are merged under one canonical name in this index; the or
 - [Browse by year and CTF](#browse-by-year-and-ctf)
 - [Browse by category](#browse-by-category)
 - [Browse by technique / tag](#browse-by-technique-tag)
-- [Tag aliases](#tag-aliases)
 
 ### Categories
 
